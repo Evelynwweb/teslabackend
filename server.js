@@ -4,11 +4,18 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 
 const app = express();
+
+// CORS – add your Vercel frontend URL too (update after deployment)
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174'],
+  origin: ['http://localhost:5173', 'http://localhost:5174', 'https://your-frontend.vercel.app'],
   credentials: true,
 }));
 app.use(express.json());
+
+// ✅ Add a root route so Vercel doesn't show "Cannot GET /"
+app.get('/', (req, res) => {
+  res.json({ message: 'Tesla Dashboard API is running' });
+});
 
 // Routes
 app.use('/api', require('./routes/auth'));
@@ -26,11 +33,18 @@ app.use('/api/copy-trade', require('./routes/copyTradeRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/admin', require('./routes/admin'));
 
+// Database connection
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
-    console.log('MongoDB connected');
-    app.listen(process.env.PORT || 5000, () => {
-      console.log(`Server running on port ${process.env.PORT || 5000}`);
-    });
-  })
+  .then(() => console.log('MongoDB connected'))
   .catch(err => console.log(err));
+
+// ✅ Export for Vercel (serverless)
+module.exports = app;
+
+// ✅ Only listen if NOT on Vercel (local dev)
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
