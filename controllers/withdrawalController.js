@@ -10,30 +10,41 @@ exports.confirmPassword = async (req, res) => {
   res.json({ success: true });
 };
 
+// controllers/withdrawalController.js
 exports.createWithdrawal = async (req, res) => {
-  const { amount, method } = req.body;
-  const user = req.user;
+  try {
+    const { amount, method, details, wcCode } = req.body;
+    const user = req.user;
 
-  if (amount < 10) return res.status(400).json({ message: 'Minimum $10' });
-  if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+    if (!amount || amount < 10) {
+      return res.status(400).json({ message: 'Minimum withdrawal is $10' });
+    }
+    if (user.balance < amount) {
+      return res.status(400).json({ message: 'Insufficient balance' });
+    }
 
-  user.balance -= amount;
-  await user.save();
+    // Create withdrawal request without touching balance
+    const withdrawal = await Withdrawal.create({
+      user: user._id,
+      amount,
+      method,
+      details: details || '',
+      wcCode: wcCode || '',
+      status: 'pending'
+    });
 
-  const withdrawal = await Withdrawal.create({
-    user: user._id,
-    amount,
-    method,
-    status: 'pending'
-  });
+    // Log a pending transaction (optional)
+    await Transaction.create({
+      user: user._id,
+      amount: -amount,
+      type: 'withdrawal',
+      status: 'pending',
+      description: `Withdrawal via ${method}`
+    });
 
-  await Transaction.create({
-    user: user._id,
-    amount: -amount,
-    type: 'withdrawal',
-    status: 'pending',
-    description: `Withdrawal via ${method}`
-  });
-
-  res.status(201).json({ message: 'Withdrawal request submitted' });
+    res.status(201).json({ message: 'Withdrawal request submitted', withdrawalId: withdrawal._id });
+  } catch (error) {
+    console.error('Withdrawal error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
 };
