@@ -40,6 +40,11 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.log(err));
 
+  app.use((err, req, res, next) => {
+  console.error('🔥 Unhandled error:', err);
+  res.status(500).json({ message: 'Internal server error' });
+});
+
 // ✅ Export for Vercel (serverless)
 module.exports = app;
 

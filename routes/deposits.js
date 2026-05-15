@@ -7,40 +7,48 @@ const User = require('../models/User');
 
 // POST /api/deposits - initiate a deposit (from Deposits.jsx onSubmit)
 router.post('/deposits', protect, async (req, res) => {
-  const { amount, payment_method } = req.body;
-  if (!amount || amount < 50) {
-    return res.status(400).json({ message: 'Amount must be at least 50' });
-  }
-  if (!payment_method) {
-    return res.status(400).json({ message: 'Payment method required' });
-  }
-  
-  const deposit = await Deposit.create({
-    user: req.user._id,
-    amount,
-    paymentMethod: payment_method,
-    status: 'pending'
-  });
-  
-  // Create a pending transaction record
-  await Transaction.create({
-    user: req.user._id,
-    amount,
-    type: 'deposit',
-    status: 'pending',
-    description: `Deposit via ${payment_method}`
-  });
-  
-  res.status(201).json({
-    message: 'Deposit initiated successfully',
-    depositId: deposit._id,
-    // In real app, you would return payment details (wallet address, etc.)
-    paymentDetails: {
-      address: '0x1234567890abcdef',
-      network: payment_method,
-      amountToSend: amount
+  try {
+    const { amount, payment_method } = req.body;
+    if (!amount || amount < 50) {
+      return res.status(400).json({ message: 'Amount must be at least 50' });
     }
-  });
+    if (!payment_method) {
+      return res.status(400).json({ message: 'Payment method required' });
+    }
+
+    const deposit = await Deposit.create({
+      user: req.user._id,
+      amount,
+      paymentMethod: payment_method,
+      status: 'pending'
+    });
+
+    await Transaction.create({
+      user: req.user._id,
+      amount,
+      type: 'deposit',
+      status: 'pending',
+      description: `Deposit via ${payment_method}`
+    });
+
+    res.status(201).json({
+      message: 'Deposit initiated successfully',
+      depositId: deposit._id,
+      paymentDetails: {
+        address: '0x1234567890abcdef',
+        network: payment_method,
+        amountToSend: amount
+      }
+    });
+  } catch (error) {
+    console.error('Deposit route error:', error);
+    // Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(e => e.message);
+      return res.status(400).json({ message: messages.join(', ') });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
 });
 
 // GET /api/deposits/history - optional, for viewing past deposits (not in frontend but can be used)

@@ -1,4 +1,6 @@
 const User = require('../models/User');
+const Deposit = require('../models/Deposit');
+const Withdrawal = require('../models/Withdrawal');
 const jwt = require('jsonwebtoken');
 
 // Admin login (must generate token)
@@ -78,11 +80,95 @@ exports.deletePlan = async (req, res) => {
 };
 
 // Deposits
-exports.getDeposits = async (req, res) => { res.json([]); };
-exports.approveDeposit = async (req, res) => { res.json({ message: 'Approved' }); };
-exports.rejectDeposit = async (req, res) => { res.json({ message: 'Rejected' }); };
+exports.getDeposits = async (req, res) => {
+  try {
+    const deposits = await Deposit.find()
+      .populate('user', 'name email')  // attach user name/email
+      .sort({ createdAt: -1 });
+    res.json(deposits);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.approveDeposit = async (req, res) => {
+  try {
+    const deposit = await Deposit.findById(req.params.id);
+    if (!deposit) {
+      return res.status(404).json({ message: 'Deposit not found' });
+    }
+    if (deposit.status !== 'pending') {
+      return res.status(400).json({ message: 'Deposit already processed' });
+    }
+
+    // Update deposit status
+    deposit.status = 'completed';
+    await deposit.save();
+
+    // Credit user balance and total deposited
+    const user = await User.findById(deposit.user);
+    if (user) {
+      user.balance += deposit.amount;
+      user.totalDeposited += deposit.amount;
+      await user.save();
+    }
+
+    res.json({ message: 'Deposit approved and balance credited' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.rejectDeposit = async (req, res) => {
+  try {
+    const deposit = await Deposit.findByIdAndUpdate(
+      req.params.id,
+      { status: 'failed' },
+      { new: true }
+    );
+    if (!deposit) {
+      return res.status(404).json({ message: 'Deposit not found' });
+    }
+    res.json({ message: 'Deposit rejected' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
 
 // Withdrawals
-exports.getWithdrawals = async (req, res) => { res.json([]); };
-exports.approveWithdrawal = async (req, res) => { res.json({ message: 'Approved' }); };
-exports.rejectWithdrawal = async (req, res) => { res.json({ message: 'Rejected' }); };
+exports.getWithdrawals = async (req, res) => {
+  try {
+    const withdrawals = await Withdrawal.find()
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 });
+    res.json(withdrawals);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.approveWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findByIdAndUpdate(
+      req.params.id,
+      { status: 'completed' },
+      { new: true }
+    );
+    res.json({ message: 'Approved', withdrawal });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+exports.rejectWithdrawal = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findByIdAndUpdate(
+      req.params.id,
+      { status: 'failed' },
+      { new: true }
+    );
+    res.json({ message: 'Rejected', withdrawal });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
