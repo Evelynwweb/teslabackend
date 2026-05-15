@@ -32,6 +32,8 @@ app.use('/api/investment-plans', require('./routes/investmentPlanRoutes'));
 app.use('/api/copy-trade', require('./routes/copyTradeRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/tracking', require('./routes/tracking'));
+
 
 // Database connection
 mongoose.connect(process.env.MONGO_URI)
