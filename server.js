@@ -33,7 +33,8 @@ app.use('/api/copy-trade', require('./routes/copyTradeRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/tracking', require('./routes/tracking'));
-
+app.use('/api/user', require('./routes/userPaymentRoutes'));
+app.use('/api/support', require('./routes/supportRoutes'));
 
 // Database connection
 mongoose.connect(process.env.MONGO_URI)
