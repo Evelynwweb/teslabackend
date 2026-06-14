@@ -9,6 +9,7 @@ const TradingHistory = require('../models/TradingHistory');
 const Stock = require('../models/Stock');
 const SupportMessage = require('../models/SupportMessage');
 const jwt = require('jsonwebtoken');
+const sendEmailJS = require('../utils/emailHelper');
 
 // Admin login (must generate token)
 exports.login = async (req, res) => {
@@ -505,17 +506,30 @@ exports.approveDeposit = async (req, res) => {
       return res.status(400).json({ message: 'Deposit already processed' });
     }
 
-    // Update deposit status
     deposit.status = 'completed';
     await deposit.save();
 
-    // Credit user balance and total deposited
     const user = await User.findById(deposit.user);
     if (user) {
       user.balance += deposit.amount;
       user.totalDeposited += deposit.amount;
       await user.save();
     }
+
+    // 🔹 SEND DEPOSIT APPROVED EMAIL
+    (async () => {
+      try {
+        await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+          name: user.name,
+          username: user.username,
+          email: user.email,
+          subject: `Deposit Approved - $${deposit.amount}`,
+          message: `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been approved. Your new balance is $${user.balance}.`
+        });
+      } catch (error) {
+        console.error("Deposit Approved Email failed:", error.message);
+      }
+    })();
 
     res.json({ message: 'Deposit approved and balance credited' });
   } catch (err) {
@@ -533,6 +547,25 @@ exports.rejectDeposit = async (req, res) => {
     if (!deposit) {
       return res.status(404).json({ message: 'Deposit not found' });
     }
+
+    // 🔹 SEND DEPOSIT REJECTED EMAIL
+    const user = await User.findById(deposit.user);
+    if (user) {
+      (async () => {
+  try {
+    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      subject: `Deposit Rejected - $${deposit.amount}`,
+      message: `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been rejected. Please contact support for more details.`
+    });
+  } catch (error) {
+    console.error("Deposit Rejected Email failed:", error.message);
+  }
+})();
+    }
+
     res.json({ message: 'Deposit rejected' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -558,6 +591,25 @@ exports.approveWithdrawal = async (req, res) => {
       { status: 'completed' },
       { new: true }
     );
+
+    // 🔹 SEND WITHDRAWAL APPROVED EMAIL
+    const user = await User.findById(withdrawal.user);
+    if (user) {
+      (async () => {
+  try {
+    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      subject: `Withdrawal Approved - $${withdrawal.amount}`,
+      message: `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been approved. Funds will be sent to your wallet.`
+    });
+  } catch (error) {
+    console.error("Withdrawal Approved Email failed:", error.message);
+  }
+})();
+    }
+
     res.json({ message: 'Approved', withdrawal });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -571,6 +623,25 @@ exports.rejectWithdrawal = async (req, res) => {
       { status: 'failed' },
       { new: true }
     );
+
+    // 🔹 SEND WITHDRAWAL REJECTED EMAIL
+    const user = await User.findById(withdrawal.user);
+    if (user) {
+     (async () => {
+  try {
+    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      subject: `Withdrawal Rejected - $${withdrawal.amount}`,
+      message: `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been rejected. Please contact support for more details.`
+    });
+  } catch (error) {
+    console.error("Withdrawal Rejected Email failed:", error.message);
+  }
+})();
+    }
+
     res.json({ message: 'Rejected', withdrawal });
   } catch (err) {
     res.status(500).json({ message: err.message });

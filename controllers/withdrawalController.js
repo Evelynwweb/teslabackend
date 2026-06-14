@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Withdrawal = require('../models/Withdrawal');
 const Transaction = require('../models/Transaction');
+const sendEmailJS = require('../utils/emailHelper');  // <--- ADD THIS
 
 exports.confirmPassword = async (req, res) => {
   const { password } = req.body;
@@ -10,7 +11,6 @@ exports.confirmPassword = async (req, res) => {
   res.json({ success: true });
 };
 
-// controllers/withdrawalController.js
 exports.createWithdrawal = async (req, res) => {
   try {
     const { amount, method, details, wcCode } = req.body;
@@ -23,7 +23,6 @@ exports.createWithdrawal = async (req, res) => {
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    // Create withdrawal request without touching balance
     const withdrawal = await Withdrawal.create({
       user: user._id,
       amount,
@@ -33,7 +32,6 @@ exports.createWithdrawal = async (req, res) => {
       status: 'pending'
     });
 
-    // Log a pending transaction (optional)
     await Transaction.create({
       user: user._id,
       amount: -amount,
@@ -41,6 +39,21 @@ exports.createWithdrawal = async (req, res) => {
       status: 'pending',
       description: `Withdrawal via ${method}`
     });
+
+    // 🔹 SEND PENDING WITHDRAWAL EMAIL
+(async () => {
+  try {
+    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      subject: `Withdrawal Pending - $${amount}`,
+      message: `Your withdrawal of $${amount} via ${method} is pending. We will notify you once it's approved.`
+    });
+  } catch (error) {
+    console.error("Withdrawal Pending Email failed:", error.message);
+  }
+})();
 
     res.status(201).json({ message: 'Withdrawal request submitted', withdrawalId: withdrawal._id });
   } catch (error) {
