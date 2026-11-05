@@ -37,13 +37,6 @@ exports.updatePaymentSettings = async (req, res) => {
       }
     }
     
-    // Remove orphaned depositAddresses if methodDetails no longer exists? 
-    // (optional cleanup)
-    for (let [methodId] of settings.depositAddresses) {
-      if (!settings.methodDetails.has(methodId)) {
-        settings.depositAddresses.delete(methodId);
-      }
-    }
     
     await settings.save();
     res.json(settings);

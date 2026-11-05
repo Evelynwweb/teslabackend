@@ -12,6 +12,7 @@ router.use(protect, admin);
 router.get('/stats', adminCtrl.getStats);
 router.get('/users', adminCtrl.getUsers);
 router.put('/users/:id/status', adminCtrl.updateUserStatus);
+router.delete('/users/:id', adminCtrl.deleteUser);
 router.get('/plans', adminCtrl.getPlans);
 router.post('/plans', adminCtrl.createPlan);
 router.put('/plans/:id', adminCtrl.updatePlan);

@@ -647,3 +647,41 @@ exports.rejectWithdrawal = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
+
+// Delete a user (admin only)
+exports.deleteUser = async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const currentAdminId = req.user.id; // from protect middleware
+
+    // Optional: prevent admin from deleting themselves
+    if (userId === currentAdminId) {
+      return res.status(400).json({ message: 'You cannot delete your own admin account.' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Optional: prevent deletion of other admins (only if you want)
+    if (user.role === 'admin') {
+      return res.status(403).json({ message: 'Cannot delete another admin user.' });
+    }
+
+    await User.findByIdAndDelete(userId);
+
+    // (Optional) Also delete related records: deposits, withdrawals, investments, etc.
+    // This is a soft-delete alternative – but here we do hard delete.
+    // You may want to keep audit logs or just remove everything.
+    // Example:
+    // await Deposit.deleteMany({ user: userId });
+    // await Withdrawal.deleteMany({ user: userId });
+    // await UserInvestment.deleteMany({ user: userId });
+    // etc.
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};

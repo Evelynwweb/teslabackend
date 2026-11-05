@@ -19,11 +19,20 @@ exports.investStock = async (req, res) => {
     const { stockId, stockName, symbol, amount, duration, endDate } = req.body;
     const user = req.user;
 
-    if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+    if (!amount || amount <= 0)
+      return res.status(400).json({ message: 'Invalid amount' });
+    if (user.balance < amount)
+      return res.status(400).json({ message: 'Insufficient balance' });
+
+    // Prefer the rate stored on the Stock record (adjust field name if needed)
+    const stock = await Stock.findOne({ stockId });
+    const dailyProfitRate =
+      (stock && stock.dailyProfitRate) || Number(req.body.dailyProfitRate) || 0.5;
 
     user.balance -= amount;
     await user.save();
 
+    const startDate = new Date();
     const investment = await StockInvestment.create({
       user: user._id,
       stockId,
@@ -31,7 +40,12 @@ exports.investStock = async (req, res) => {
       symbol,
       amount,
       duration,
-      endDate: endDate || new Date(Date.now() + (duration === '6 Months' ? 180 : 365) * 24 * 60 * 60 * 1000)
+      startDate,
+      lastProfitDate: startDate,
+      dailyProfitRate,
+      endDate:
+        endDate ||
+        new Date(Date.now() + (duration === '6 Months' ? 180 : 365) * 86400000),
     });
 
     await Transaction.create({
@@ -39,7 +53,7 @@ exports.investStock = async (req, res) => {
       amount: -amount,
       type: 'investment',
       description: `Invested in ${stockName} stock`,
-      status: 'completed'
+      status: 'completed',
     });
 
     res.status(201).json({ message: 'Stock investment successful', investment });

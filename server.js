@@ -5,16 +5,37 @@ const cors = require('cors');
 
 const app = express();
 
-// CORS – add your Vercel frontend URL too (update after deployment)
-app.use(cors({
-  origin: true,                // reflects the request origin
-  credentials: true,
-}));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
-// ✅ Add a root route so Vercel doesn't show "Cannot GET /"
 app.get('/', (req, res) => {
   res.json({ message: 'Tesla Dashboard API is running' });
+});
+
+// ─── Serverless-safe Mongo connection ────────────────────────
+let connPromise = null;
+async function connectDB() {
+  if (mongoose.connection.readyState === 1) return;
+  if (!connPromise) {
+    connPromise = mongoose.connect(process.env.MONGO_URI, {
+      serverSelectionTimeoutMS: 8000,
+    }).catch((err) => {
+      connPromise = null;
+      throw err;
+    });
+  }
+  await connPromise;
+}
+
+// Await DB on every request (cheap once connected)
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    console.error('DB connect error:', err);
+    res.status(500).json({ message: 'DB connection failed' });
+  }
 });
 
 // Routes
@@ -36,23 +57,20 @@ app.use('/api/tracking', require('./routes/tracking'));
 app.use('/api/user', require('./routes/userPaymentRoutes'));
 app.use('/api/support', require('./routes/supportRoutes'));
 
-// Database connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.log(err));
+// ✅ Cron endpoint
+app.use('/api/cron', require('./routes/cronRoutes'));
 
-  app.use((err, req, res, next) => {
+// Error handler
+app.use((err, req, res, next) => {
   console.error('🔥 Unhandled error:', err);
   res.status(500).json({ message: 'Internal server error' });
 });
 
-// ✅ Export for Vercel (serverless)
 module.exports = app;
 
-// ✅ Only listen if NOT on Vercel (local dev)
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-  });
+  connectDB()
+    .then(() => app.listen(PORT, () => console.log(`Server on ${PORT}`)))
+    .catch((e) => console.error('Failed to start:', e));
 }

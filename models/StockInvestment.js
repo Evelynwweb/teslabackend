@@ -10,7 +10,12 @@ const stockInvestmentSchema = new mongoose.Schema({
   startDate: { type: Date, default: Date.now },
   endDate: { type: Date, required: true },
   status: { type: String, enum: ['active', 'completed', 'cancelled'], default: 'active' },
-  profit: { type: Number, default: 0 }
+  profit: { type: Number, default: 0 },
+
+  // ── NEW ────────────────────────────────────────────
+  dailyProfitRate: { type: Number, required: true, default: 0.5 }, // % per day (snapshot)
+  lastProfitDate: { type: Date, required: true, default: Date.now },
+  // ───────────────────────────────────────────────────
 });
 
 module.exports = mongoose.model('StockInvestment', stockInvestmentSchema);
