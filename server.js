@@ -68,6 +68,11 @@ app.use('/api/support', require('./routes/supportRoutes'));
 // ✅ Cron endpoint
 app.use('/api/cron', require('./routes/cronRoutes'));
 
+// Unknown route → JSON (Express's default is an HTML page the client can't parse)
+app.use((req, res) => {
+  res.status(404).json({ message: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
 // Error handler
 app.use((err, req, res, next) => {
   console.error('🔥 Unhandled error:', err);
