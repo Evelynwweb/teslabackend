@@ -592,6 +592,10 @@ exports.approveWithdrawal = async (req, res) => {
       { new: true }
     );
 
+    if (!withdrawal) {
+      return res.status(404).json({ message: 'Withdrawal not found' });
+    }
+
     // 🔹 SEND WITHDRAWAL APPROVED EMAIL
     const user = await User.findById(withdrawal.user);
     if (user) {
@@ -623,6 +627,10 @@ exports.rejectWithdrawal = async (req, res) => {
       { status: 'failed' },
       { new: true }
     );
+
+    if (!withdrawal) {
+      return res.status(404).json({ message: 'Withdrawal not found' });
+    }
 
     // 🔹 SEND WITHDRAWAL REJECTED EMAIL
     const user = await User.findById(withdrawal.user);

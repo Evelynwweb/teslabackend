@@ -71,6 +71,10 @@ module.exports = app;
 if (!process.env.VERCEL) {
   const PORT = process.env.PORT || 5000;
   connectDB()
-    .then(() => app.listen(PORT, () => console.log(`Server on ${PORT}`)))
+    .then(() => {
+      // On Vercel the daily run comes from vercel.json "crons"; locally use node-cron
+      require('./jobs/dailyProfitJob')();
+      app.listen(PORT, () => console.log(`Server on ${PORT}`));
+    })
     .catch((e) => console.error('Failed to start:', e));
 }
