@@ -1,6 +1,11 @@
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
 
+// GET /api/users/me – the signed-in user (protect already loaded it without the password)
+exports.getMe = async (req, res) => {
+  res.json(req.user);
+};
+
 // PUT /api/users/profile
 exports.updateProfile = async (req, res) => {
   try {

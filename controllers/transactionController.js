@@ -18,7 +18,7 @@ exports.getWithdrawals = async (req, res) => {
 exports.getOthers = async (req, res) => {
   const others = await Transaction.find({
     user: req.user._id,
-    type: { $in: ['bonus', 'referral'] }
+    type: { $in: ['bonus', 'referral', 'profit', 'investment'] }
   }).sort({ createdAt: -1 });
   res.json(others);
 };

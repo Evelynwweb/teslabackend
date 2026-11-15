@@ -1,4 +1,21 @@
 const PaymentSetting = require('../models/PaymentSetting');
+const Deposit = require('../models/Deposit');
+
+// GET /api/user/deposit-stats
+exports.getDepositStats = async (req, res) => {
+  try {
+    const pending = await Deposit.aggregate([
+      { $match: { user: req.user._id, status: 'pending' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]);
+    res.json({
+      totalDeposited: req.user.totalDeposited || 0,
+      pendingDeposits: pending[0]?.total || 0,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
 
 exports.getDepositMethods = async (req, res) => {
   try {

@@ -27,6 +27,14 @@ async function connectDB() {
   await connPromise;
 }
 
+// Public client config (no DB needed). The dashboard reads this to decide
+// whether signup goes through email verification first.
+app.get('/api/config', (req, res) => {
+  res.json({
+    requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === 'true',
+  });
+});
+
 // Await DB on every request (cheap once connected)
 app.use(async (req, res, next) => {
   try {
