@@ -9,6 +9,7 @@ router.post('/login', adminCtrl.login);
 
 // All routes below require admin role
 router.use(protect, admin);
+router.get('/me', adminCtrl.getMe);
 router.get('/stats', adminCtrl.getStats);
 router.get('/users', adminCtrl.getUsers);
 router.put('/users/:id/status', adminCtrl.updateUserStatus);
@@ -23,6 +24,10 @@ router.put('/deposits/:id/reject', adminCtrl.rejectDeposit);
 router.get('/withdrawals', adminCtrl.getWithdrawals);
 router.put('/withdrawals/:id/approve', adminCtrl.approveWithdrawal);
 router.put('/withdrawals/:id/reject', adminCtrl.rejectWithdrawal);
+router.get('/settings', settingsCtrl.getGeneralSettings);
+router.put('/settings', settingsCtrl.updateGeneralSettings);
+router.post('/users/:id/impersonate', adminCtrl.impersonateUser);
+router.get('/deposits/:id/proof', adminCtrl.getDepositProof);
 router.get('/payment-settings', settingsCtrl.getPaymentSettings);
 router.put('/payment-settings', settingsCtrl.updatePaymentSettings);
 

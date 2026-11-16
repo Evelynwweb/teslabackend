@@ -10,19 +10,22 @@ const Stock = require('../models/Stock');
 const SupportMessage = require('../models/SupportMessage');
 const jwt = require('jsonwebtoken');
 const sendEmailJS = require('../utils/emailHelper');
+const { durationToDays } = require('../utils/duration');
 
 // Admin login (must generate token)
 exports.login = async (req, res) => {
   const { email, password } = req.body;
   try {
-    const user = await User.findOne({ email });
-    if (!user) return res.status(401).json({ message: 'Invalid credentials' });
-    
-    const isMatch = await user.matchPassword(password);
-    if (!isMatch) return res.status(401).json({ message: 'Invalid credentials' });
-    
+    const login = String(email || '').trim().toLowerCase();
+    if (!login || !password) return res.status(400).json({ message: 'Email and password are required' });
+
+    const user = await User.findOne({ email: login });
+    // 400 (not 401) so the admin app shows the message instead of a session-expired redirect
+    if (!user || !(await user.matchPassword(password))) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
     if (user.role !== 'admin') return res.status(403).json({ message: 'Not an admin' });
-    
+
     const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
     res.json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
@@ -30,26 +33,68 @@ exports.login = async (req, res) => {
   }
 };
 
-// Dashboard stats (simplified – adapt to your models)
+// GET /api/admin/me – the signed-in admin (for the header)
+exports.getMe = async (req, res) => {
+  const { _id, name, email, role } = req.user;
+  res.json({ id: _id, name, email, role });
+};
+
+const sumAmount = async (Model, match) => {
+  const r = await Model.aggregate([{ $match: match }, { $group: { _id: null, total: { $sum: '$amount' } } }]);
+  return r[0]?.total || 0;
+};
+
+// Dashboard stats – all computed from the database
 exports.getStats = async (req, res) => {
   try {
-    const totalUsers = await User.countDocuments();
-    res.json({ totalUsers, totalDeposits: 0, totalWithdrawals: 0, pendingDeposits: 0, pendingWithdrawals: 0, activeInvestments: 0 });
+    const [
+      totalUsers,
+      totalDeposits,
+      totalWithdrawals,
+      pendingDeposits,
+      pendingWithdrawals,
+      activeStock,
+      activePlans,
+    ] = await Promise.all([
+      User.countDocuments({ role: { $ne: 'admin' } }),
+      sumAmount(Deposit, { status: 'completed' }),
+      sumAmount(Withdrawal, { status: 'completed' }),
+      Deposit.countDocuments({ status: 'pending' }),
+      Withdrawal.countDocuments({ status: 'pending' }),
+      StockInvestment.countDocuments({ status: 'active' }),
+      UserInvestment.countDocuments({ status: 'active' }),
+    ]);
+    res.json({
+      totalUsers,
+      totalDeposits,
+      totalWithdrawals,
+      pendingDeposits,
+      pendingWithdrawals,
+      activeInvestments: activeStock + activePlans,
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
+// Escape user input before using it in a regex ("(" used to crash the search)
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Get all users (paginated)
 exports.getUsers = async (req, res) => {
-  const page = parseInt(req.query.page) || 1;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = 10;
-  const search = req.query.search || '';
-  const query = search ? { $or: [{ name: { $regex: search, $options: 'i' } }, { email: { $regex: search, $options: 'i' } }] } : {};
+  const search = String(req.query.search || '').trim();
+  const rx = search ? { $regex: escapeRegex(search), $options: 'i' } : null;
+  const query = rx ? { $or: [{ name: rx }, { email: rx }, { username: rx }] } : {};
   try {
-    const users = await User.find(query).select('-password').skip((page-1)*limit).limit(limit);
+    const users = await User.find(query)
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
     const total = await User.countDocuments(query);
-    res.json({ users, totalPages: Math.ceil(total/limit), currentPage: page });
+    res.json({ users, totalPages: Math.max(1, Math.ceil(total / limit)), currentPage: page, total });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -58,8 +103,51 @@ exports.getUsers = async (req, res) => {
 // Suspend/activate user
 exports.updateUserStatus = async (req, res) => {
   try {
-    const user = await User.findByIdAndUpdate(req.params.id, { isActive: req.body.isActive }, { new: true }).select('-password');
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isActive: Boolean(req.body.isActive) },
+      { returnDocument: 'after' }
+    ).select('-password');
+    if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// POST /api/admin/users/:id/impersonate – short-lived token to open the
+// user's dashboard as them (support). The token carries `imp` so the API
+// can flag, log and restrict the session (see middleware/auth.js).
+exports.impersonateUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('name email role');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (user.role === 'admin') {
+      return res.status(400).json({ message: 'Admin accounts cannot be impersonated' });
+    }
+    const token = jwt.sign(
+      { id: user._id, imp: String(req.user._id) },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    console.log(`[IMPERSONATION] admin=${req.user._id} (${req.user.email}) started session as user=${user._id} (${user.email})`);
+    res.json({ token, expiresIn: 3600, user: { id: user._id, name: user.name, email: user.email } });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// GET /api/admin/deposits/:id/proof – streams the uploaded payment proof
+exports.getDepositProof = async (req, res) => {
+  try {
+    const deposit = await Deposit.findById(req.params.id).select('+proof.data');
+    if (!deposit) return res.status(404).json({ message: 'Deposit not found' });
+    if (!deposit.proof || !deposit.proof.data) {
+      return res.status(404).json({ message: 'No proof was stored for this deposit' });
+    }
+    res.set('Content-Type', deposit.proof.contentType || 'application/octet-stream');
+    res.set('Content-Disposition', `inline; filename="${(deposit.proof.filename || 'proof').replace(/"/g, '')}"`);
+    res.send(deposit.proof.data);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -107,7 +195,11 @@ exports.updateUser = async (req, res) => {
 // Add/remove balance (admin)
 exports.adjustUserBalance = async (req, res) => {
   try {
-    const { amount, operation } = req.body; // operation: 'add' or 'subtract'
+    const { operation } = req.body; // operation: 'add' or 'subtract'
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ message: 'Enter a valid positive amount' });
+    }
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -166,13 +258,22 @@ exports.markAsRead = async (req, res) => {
 exports.replyToMessage = async (req, res) => {
   try {
     const { id } = req.params;
-    const { adminReply } = req.body;
+    const adminReply = String(req.body.adminReply || '').trim();
+    if (!adminReply) return res.status(400).json({ message: 'Reply cannot be empty' });
     const message = await SupportMessage.findByIdAndUpdate(
       id,
       { adminReply, status: 'replied', updatedAt: Date.now() },
-      { new: true }
-    );
+      { returnDocument: 'after' }
+    ).populate('user', 'name username email');
     if (!message) return res.status(404).json({ message: 'Message not found' });
+
+    // The user dashboard has no inbox, so the reply is delivered by email
+    notify(
+      message.user,
+      `Re: ${message.subject}`,
+      `${adminReply}\n\n— In reply to your message: "${message.message}"`
+    );
+
     res.json(message);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -188,26 +289,61 @@ exports.getUnreadCount = async (req, res) => {
   }
 };
 
-// Investment plans CRUD (assuming you have Plan model – if not, create a simple one)
+// Investment plans CRUD
+const Plan = require('../models/Plan');
+
+const readPlan = (body) => {
+  const plan = {
+    name: String(body.name || '').trim(),
+    min_amount: Number(body.min_amount),
+    max_amount: Number(body.max_amount),
+    duration: String(body.duration || '').trim(),
+    roi_percentage: Number(body.roi_percentage),
+  };
+  if (body.status) plan.status = body.status === 'inactive' ? 'inactive' : 'active';
+  if (!plan.name) return { error: 'Plan name is required' };
+  if (!Number.isFinite(plan.min_amount) || plan.min_amount <= 0) return { error: 'Min amount must be a positive number' };
+  if (!Number.isFinite(plan.max_amount) || plan.max_amount < plan.min_amount) return { error: 'Max amount must be at least the min amount' };
+  if (!durationToDays(plan.duration)) return { error: 'Duration must look like "30 Days", "2 Weeks" or "6 Months"' };
+  if (!Number.isFinite(plan.roi_percentage) || plan.roi_percentage < 0) return { error: 'ROI % must be zero or more' };
+  return { plan };
+};
+
 exports.getPlans = async (req, res) => {
-  const Plan = require('../models/Plan');
-  const plans = await Plan.find();
-  res.json(plans);
+  try {
+    res.json(await Plan.find().sort({ min_amount: 1 }));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 exports.createPlan = async (req, res) => {
-  const Plan = require('../models/Plan');
-  const plan = await Plan.create(req.body);
-  res.status(201).json(plan);
+  try {
+    const { plan, error } = readPlan(req.body);
+    if (error) return res.status(400).json({ message: error });
+    res.status(201).json(await Plan.create(plan));
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 exports.updatePlan = async (req, res) => {
-  const Plan = require('../models/Plan');
-  const plan = await Plan.findByIdAndUpdate(req.params.id, req.body, { new: true });
-  res.json(plan);
+  try {
+    const { plan, error } = readPlan(req.body);
+    if (error) return res.status(400).json({ message: error });
+    const updated = await Plan.findByIdAndUpdate(req.params.id, plan, { returnDocument: 'after' });
+    if (!updated) return res.status(404).json({ message: 'Plan not found' });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 exports.deletePlan = async (req, res) => {
-  const Plan = require('../models/Plan');
-  await Plan.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Deleted' });
+  try {
+    const deleted = await Plan.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ message: 'Plan not found' });
+    res.json({ message: 'Deleted' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 };
 
 
@@ -228,16 +364,25 @@ exports.getUserInvestments = async (req, res) => {
 exports.updateUserInvestment = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, totalReturns } = req.body;
+    const { status } = req.body;
+    if (!['active', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
+    const totalReturns = req.body.totalReturns !== undefined ? Number(req.body.totalReturns) : undefined;
+    if (totalReturns !== undefined && (!Number.isFinite(totalReturns) || totalReturns < 0)) {
+      return res.status(400).json({ message: 'Total returns must be a positive number' });
+    }
     const investment = await UserInvestment.findById(id);
     if (!investment) return res.status(404).json({ message: 'Investment not found' });
+    const wasCompleted = investment.status === 'completed';
 
     investment.status = status;
     if (totalReturns !== undefined) investment.totalReturns = totalReturns;
     await investment.save();
 
-    // If status becomes 'completed' and totalReturns > 0, add profit to user balance
-    if (status === 'completed' && totalReturns && totalReturns > 0) {
+    // Credit the profit once, when the plan first becomes completed
+    // (re-saving a completed plan used to pay the profit again each time).
+    if (status === 'completed' && !wasCompleted && totalReturns && totalReturns > 0) {
       const user = await User.findById(investment.user);
       if (user) {
         const profit = totalReturns - investment.amount;
@@ -280,11 +425,11 @@ exports.deleteUserInvestment = async (req, res) => {
 exports.addStockInvestmentProfit = async (req, res) => {
   try {
     const { id } = req.params;
-    const { profitAmount } = req.body;
+    const profitAmount = Number(req.body.profitAmount);
     const investment = await StockInvestment.findById(id);
     if (!investment) return res.status(404).json({ message: 'Investment not found' });
 
-    if (profitAmount <= 0) return res.status(400).json({ message: 'Profit amount must be positive' });
+    if (!Number.isFinite(profitAmount) || profitAmount <= 0) return res.status(400).json({ message: 'Profit amount must be positive' });
 
     // Update investment profit (accumulate)
     investment.profit = (investment.profit || 0) + profitAmount;
@@ -326,11 +471,11 @@ exports.addStockInvestmentProfit = async (req, res) => {
 exports.addPlanInvestmentProfit = async (req, res) => {
   try {
     const { id } = req.params;
-    const { profitAmount } = req.body;
+    const profitAmount = Number(req.body.profitAmount);
     const investment = await UserInvestment.findById(id);
     if (!investment) return res.status(404).json({ message: 'Investment not found' });
 
-    if (profitAmount <= 0) return res.status(400).json({ message: 'Profit amount must be positive' });
+    if (!Number.isFinite(profitAmount) || profitAmount <= 0) return res.status(400).json({ message: 'Profit amount must be positive' });
 
     // Update totalReturns (accumulate)
     investment.totalReturns = (investment.totalReturns || 0) + profitAmount;
@@ -381,18 +526,25 @@ exports.getStocksAdmin = async (req, res) => {
 // CREATE new stock
 exports.createStock = async (req, res) => {
   try {
-    const { stockId, name, symbol, min, max, duration } = req.body;
+    const { stockId, name, symbol, min, max, duration, dailyProfitRate } = req.body;
+    if (!stockId || !name || !symbol) {
+      return res.status(400).json({ message: 'Stock ID, name and symbol are required' });
+    }
+    if (Number(min) > Number(max)) {
+      return res.status(400).json({ message: 'Minimum cannot exceed maximum' });
+    }
     // Check if stockId exists
     const existing = await Stock.findOne({ stockId });
     if (existing) return res.status(400).json({ message: 'Stock ID already exists' });
-    
+
     const stock = await Stock.create({
       stockId,
       name,
       symbol,
       min,
       max,
-      duration
+      duration,
+      ...(dailyProfitRate !== undefined && dailyProfitRate !== '' && { dailyProfitRate: Number(dailyProfitRate) }),
     });
     res.status(201).json(stock);
   } catch (err) {
@@ -404,8 +556,12 @@ exports.createStock = async (req, res) => {
 exports.updateStock = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
-    const stock = await Stock.findByIdAndUpdate(id, updates, { new: true });
+    // Only known fields (the whole body used to be written as-is)
+    const updates = {};
+    for (const key of ['stockId', 'name', 'symbol', 'min', 'max', 'duration', 'dailyProfitRate']) {
+      if (req.body[key] !== undefined && req.body[key] !== '') updates[key] = req.body[key];
+    }
+    const stock = await Stock.findByIdAndUpdate(id, updates, { returnDocument: 'after', runValidators: true });
     if (!stock) return res.status(404).json({ message: 'Stock not found' });
     res.json(stock);
   } catch (err) {
@@ -441,30 +597,36 @@ exports.getStockInvestments = async (req, res) => {
 exports.updateStockInvestmentStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, profit } = req.body;
+    const { status } = req.body;
+    if (!['active', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status' });
+    }
     const investment = await StockInvestment.findById(id);
     if (!investment) return res.status(404).json({ message: 'Investment not found' });
 
+    const wasCompleted = investment.status === 'completed';
+    const previousProfit = investment.profit || 0;
+    const newProfit = req.body.profit !== undefined ? Number(req.body.profit) : previousProfit;
+    if (!Number.isFinite(newProfit) || newProfit < 0) {
+      return res.status(400).json({ message: 'Profit must be a positive number' });
+    }
+
     investment.status = status;
-    if (profit !== undefined) investment.profit = profit;
+    investment.profit = Math.max(previousProfit, newProfit);
     await investment.save();
 
-    // If status is 'completed' and profit > 0, add profit to user balance?
-    // Optional: Handle profit payout automatically
-    if (status === 'completed' && profit && profit > 0) {
-      const user = await User.findById(investment.user);
-      if (user) {
-        user.balance += profit;
-        await user.save();
-        // Create transaction record
-        await Transaction.create({
-          user: user._id,
-          amount: profit,
-          type: 'investment',
-          description: `Profit from ${investment.stockName} stock investment`,
-          status: 'completed'
-        });
-      }
+    // Pay out only once, when the investment becomes completed, and only the
+    // part not already credited (the daily job credits profit as it accrues).
+    const owed = +(newProfit - previousProfit).toFixed(8);
+    if (status === 'completed' && !wasCompleted && owed > 0) {
+      await User.updateOne({ _id: investment.user }, { $inc: { balance: owed, profit: owed } });
+      await Transaction.create({
+        user: investment.user,
+        amount: owed,
+        type: 'profit',
+        description: `Final profit from ${investment.stockName} stock investment`,
+        status: 'completed'
+      });
     }
 
     res.json(investment);
@@ -488,48 +650,66 @@ exports.deleteStockInvestment = async (req, res) => {
 exports.getDeposits = async (req, res) => {
   try {
     const deposits = await Deposit.find()
-      .populate('user', 'name email')  // attach user name/email
-      .sort({ createdAt: -1 });
-    res.json(deposits);
+      .populate('user', 'name email')
+      .sort({ createdAt: -1 })
+      .lean();
+    // proof.data is excluded by the schema; tell the UI whether a file exists
+    res.json(deposits.map((d) => ({ ...d, hasProof: Boolean(d.proof && d.proof.contentType) })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
+const notify = (user, subject, message) => {
+  if (!user) return;
+  (async () => {
+    try {
+      await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        subject,
+        message,
+      });
+    } catch (error) {
+      console.error(`Email "${subject}" failed:`, error.message);
+    }
+  })();
+};
+
+const setTransactionStatus = async (id, status) => {
+  if (id) await Transaction.updateOne({ _id: id }, { $set: { status } });
+};
+
+const alreadyProcessed = async (Model, id, res, label) => {
+  const exists = await Model.exists({ _id: id });
+  return res
+    .status(exists ? 400 : 404)
+    .json({ message: exists ? `${label} already processed` : `${label} not found` });
+};
+
 exports.approveDeposit = async (req, res) => {
   try {
-    const deposit = await Deposit.findById(req.params.id);
-    if (!deposit) {
-      return res.status(404).json({ message: 'Deposit not found' });
-    }
-    if (deposit.status !== 'pending') {
-      return res.status(400).json({ message: 'Deposit already processed' });
-    }
+    // Atomic pending -> completed so a double click can't credit twice
+    const deposit = await Deposit.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'completed' } },
+      { returnDocument: 'after' }
+    );
+    if (!deposit) return alreadyProcessed(Deposit, req.params.id, res, 'Deposit');
 
-    deposit.status = 'completed';
-    await deposit.save();
+    const user = await User.findOneAndUpdate(
+      { _id: deposit.user },
+      { $inc: { balance: deposit.amount, totalDeposited: deposit.amount } },
+      { returnDocument: 'after' }
+    );
+    await setTransactionStatus(deposit.transaction, 'completed');
 
-    const user = await User.findById(deposit.user);
-    if (user) {
-      user.balance += deposit.amount;
-      user.totalDeposited += deposit.amount;
-      await user.save();
-    }
-
-    // 🔹 SEND DEPOSIT APPROVED EMAIL
-    (async () => {
-      try {
-        await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
-          name: user.name,
-          username: user.username,
-          email: user.email,
-          subject: `Deposit Approved - $${deposit.amount}`,
-          message: `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been approved. Your new balance is $${user.balance}.`
-        });
-      } catch (error) {
-        console.error("Deposit Approved Email failed:", error.message);
-      }
-    })();
+    notify(
+      user,
+      `Deposit Approved - $${deposit.amount}`,
+      `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been approved. Your new balance is $${user ? user.balance : ''}.`
+    );
 
     res.json({ message: 'Deposit approved and balance credited' });
   } catch (err) {
@@ -539,32 +719,20 @@ exports.approveDeposit = async (req, res) => {
 
 exports.rejectDeposit = async (req, res) => {
   try {
-    const deposit = await Deposit.findByIdAndUpdate(
-      req.params.id,
-      { status: 'failed' },
-      { new: true }
+    const deposit = await Deposit.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'failed' } },
+      { returnDocument: 'after' }
     );
-    if (!deposit) {
-      return res.status(404).json({ message: 'Deposit not found' });
-    }
+    if (!deposit) return alreadyProcessed(Deposit, req.params.id, res, 'Deposit');
+    await setTransactionStatus(deposit.transaction, 'failed');
 
-    // 🔹 SEND DEPOSIT REJECTED EMAIL
     const user = await User.findById(deposit.user);
-    if (user) {
-      (async () => {
-  try {
-    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
-      name: user.name,
-      username: user.username,
-      email: user.email,
-      subject: `Deposit Rejected - $${deposit.amount}`,
-      message: `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been rejected. Please contact support for more details.`
-    });
-  } catch (error) {
-    console.error("Deposit Rejected Email failed:", error.message);
-  }
-})();
-    }
+    notify(
+      user,
+      `Deposit Rejected - $${deposit.amount}`,
+      `Your deposit of $${deposit.amount} via ${deposit.paymentMethod} has been rejected. Please contact support for more details.`
+    );
 
     res.json({ message: 'Deposit rejected' });
   } catch (err) {
@@ -576,7 +744,7 @@ exports.rejectDeposit = async (req, res) => {
 exports.getWithdrawals = async (req, res) => {
   try {
     const withdrawals = await Withdrawal.find()
-      .populate('user', 'name email')
+      .populate('user', 'name email balance')
       .sort({ createdAt: -1 });
     res.json(withdrawals);
   } catch (err) {
@@ -586,33 +754,38 @@ exports.getWithdrawals = async (req, res) => {
 
 exports.approveWithdrawal = async (req, res) => {
   try {
-    const withdrawal = await Withdrawal.findByIdAndUpdate(
-      req.params.id,
-      { status: 'completed' },
-      { new: true }
+    const withdrawal = await Withdrawal.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'completed', processedAt: new Date() } },
+      { returnDocument: 'after' }
     );
+    if (!withdrawal) return alreadyProcessed(Withdrawal, req.params.id, res, 'Withdrawal');
 
-    if (!withdrawal) {
-      return res.status(404).json({ message: 'Withdrawal not found' });
+    // Requests made since holds were introduced already took the money.
+    // Older ones (held = 0) are charged now, if the balance still covers them.
+    const inc = { totalWithdrawn: withdrawal.amount };
+    let filter = { _id: withdrawal.user };
+    if (!withdrawal.held) {
+      const charge = withdrawal.amount + (withdrawal.fee || 0);
+      inc.balance = -charge;
+      filter = { _id: withdrawal.user, balance: { $gte: charge } };
     }
+    const user = await User.findOneAndUpdate(filter, { $inc: inc }, { returnDocument: 'after' });
+    if (!user) {
+      // Roll back: an old request the user can no longer cover
+      await Withdrawal.updateOne(
+        { _id: withdrawal._id },
+        { $set: { status: 'pending' }, $unset: { processedAt: 1 } }
+      );
+      return res.status(400).json({ message: 'User balance no longer covers this withdrawal' });
+    }
+    await setTransactionStatus(withdrawal.transaction, 'completed');
 
-    // 🔹 SEND WITHDRAWAL APPROVED EMAIL
-    const user = await User.findById(withdrawal.user);
-    if (user) {
-      (async () => {
-  try {
-    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
-      name: user.name,
-      username: user.username,
-      email: user.email,
-      subject: `Withdrawal Approved - $${withdrawal.amount}`,
-      message: `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been approved. Funds will be sent to your wallet.`
-    });
-  } catch (error) {
-    console.error("Withdrawal Approved Email failed:", error.message);
-  }
-})();
-    }
+    notify(
+      user,
+      `Withdrawal Approved - $${withdrawal.amount}`,
+      `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been approved. Funds will be sent to your wallet.`
+    );
 
     res.json({ message: 'Approved', withdrawal });
   } catch (err) {
@@ -622,33 +795,32 @@ exports.approveWithdrawal = async (req, res) => {
 
 exports.rejectWithdrawal = async (req, res) => {
   try {
-    const withdrawal = await Withdrawal.findByIdAndUpdate(
-      req.params.id,
-      { status: 'failed' },
-      { new: true }
+    const withdrawal = await Withdrawal.findOneAndUpdate(
+      { _id: req.params.id, status: 'pending' },
+      { $set: { status: 'failed', processedAt: new Date() } },
+      { returnDocument: 'after' }
     );
+    if (!withdrawal) return alreadyProcessed(Withdrawal, req.params.id, res, 'Withdrawal');
 
-    if (!withdrawal) {
-      return res.status(404).json({ message: 'Withdrawal not found' });
+    // Give back whatever was held when the request was made
+    let user;
+    if (withdrawal.held > 0) {
+      user = await User.findOneAndUpdate(
+        { _id: withdrawal.user },
+        { $inc: { balance: withdrawal.held } },
+        { returnDocument: 'after' }
+      );
+    } else {
+      user = await User.findById(withdrawal.user);
     }
+    await setTransactionStatus(withdrawal.transaction, 'failed');
 
-    // 🔹 SEND WITHDRAWAL REJECTED EMAIL
-    const user = await User.findById(withdrawal.user);
-    if (user) {
-     (async () => {
-  try {
-    await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
-      name: user.name,
-      username: user.username,
-      email: user.email,
-      subject: `Withdrawal Rejected - $${withdrawal.amount}`,
-      message: `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been rejected. Please contact support for more details.`
-    });
-  } catch (error) {
-    console.error("Withdrawal Rejected Email failed:", error.message);
-  }
-})();
-    }
+    const refundNote = withdrawal.held > 0 ? ` and $${withdrawal.held} was returned to your balance` : '';
+    notify(
+      user,
+      `Withdrawal Rejected - $${withdrawal.amount}`,
+      `Your withdrawal of $${withdrawal.amount} via ${withdrawal.method} has been rejected${refundNote}. Please contact support for more details.`
+    );
 
     res.json({ message: 'Rejected', withdrawal });
   } catch (err) {

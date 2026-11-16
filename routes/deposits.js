@@ -1,99 +1,102 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth');
+const multer = require('multer');
+const { protect, notWhileImpersonating } = require('../middleware/auth');
 const Deposit = require('../models/Deposit');
 const Transaction = require('../models/Transaction');
-const User = require('../models/User');
+const PaymentSetting = require('../models/PaymentSetting');
 const sendEmailJS = require('../utils/emailHelper');
-const multer = require('multer');
-const path = require('path');
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/'); // Make sure this folder exists
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
 
+// Proofs are kept in memory and saved to MongoDB. Vercel's filesystem is
+// read-only, so the old disk storage (./uploads) broke deposits in production.
 const upload = multer({
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only JPG, PNG, PDF allowed.'));
-    }
-  }
+    if (ALLOWED_TYPES.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Invalid file type. Only JPG, PNG, PDF allowed.'));
+  },
 });
+
+// Turn upload errors into a 400 with a readable message instead of a 500.
+const uploadProof = (req, res, next) => {
+  upload.single('proof')(req, res, (err) => {
+    if (!err) return next();
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'Proof file must be 5MB or smaller' : err.message;
+    res.status(400).json({ message });
+  });
+};
 
 // POST /api/deposits – initiate deposit with proof upload
-router.post('/deposits', protect, upload.single('proof'), async (req, res) => {
+router.post('/deposits', protect, notWhileImpersonating, uploadProof, async (req, res) => {
   try {
-    // req.body now contains the text fields parsed by multer
-    const { amount, payment_method } = req.body;
+    const amount = parseFloat(req.body.amount);
+    const paymentMethod = req.body.payment_method;
     const proofFile = req.file;
 
-    if (!amount || amount < 50) {
+    if (!Number.isFinite(amount) || amount < 50) {
       return res.status(400).json({ message: 'Amount must be at least 50' });
     }
-    if (!payment_method) {
+    if (!paymentMethod) {
       return res.status(400).json({ message: 'Payment method required' });
     }
     if (!proofFile) {
       return res.status(400).json({ message: 'Payment proof is required' });
     }
 
-    const deposit = await Deposit.create({
+    const transaction = await Transaction.create({
       user: req.user._id,
-      amount: parseFloat(amount),
-      paymentMethod: payment_method,
-      status: 'pending',
-      proofPath: proofFile.path // Save the file path for admin verification
-    });
-
-    await Transaction.create({
-      user: req.user._id,
-      amount: parseFloat(amount),
+      amount,
       type: 'deposit',
       status: 'pending',
-      description: `Deposit via ${payment_method}`
+      description: `Deposit via ${paymentMethod}`,
     });
 
-    // 📧 Send pending deposit email (reusing Login Alert template)
+    const deposit = await Deposit.create({
+      user: req.user._id,
+      amount,
+      paymentMethod,
+      status: 'pending',
+      proof: {
+        data: proofFile.buffer,
+        contentType: proofFile.mimetype,
+        filename: proofFile.originalname,
+      },
+      transaction: transaction._id,
+    });
+
+    // Send pending deposit email (reusing Login Alert template)
     (async () => {
       try {
         await sendEmailJS(process.env.EMAILJS_TEMPLATE_LOGIN, {
           name: req.user.name,
           username: req.user.username,
           email: req.user.email,
-          subject: `Deposit Pending - $${parseFloat(amount)}`,
-          message: `Your deposit of $${parseFloat(amount)} via ${payment_method} is pending. We will notify you once it's approved.`
+          subject: `Deposit Pending - $${amount}`,
+          message: `Your deposit of $${amount} via ${paymentMethod} is pending. We will notify you once it's approved.`,
         });
       } catch (error) {
-        console.error("Deposit Pending Email failed:", error.message);
+        console.error('Deposit Pending Email failed:', error.message);
       }
     })();
+
+    // Return the real configured address for this method (was a fake placeholder)
+    const settings = await PaymentSetting.getSettings();
+    const addr = settings.depositAddresses.get(paymentMethod);
 
     res.status(201).json({
       message: 'Deposit initiated successfully',
       depositId: deposit._id,
       paymentDetails: {
-        address: '0x1234567890abcdef',
-        network: payment_method,
-        amountToSend: parseFloat(amount)
-      }
+        address: addr ? addr.address : '',
+        network: addr ? addr.network : '',
+        amountToSend: amount,
+      },
     });
   } catch (error) {
     console.error('Deposit route error:', error);
-    if (error.message === 'Invalid file type. Only JPG, PNG, PDF allowed.') {
-      return res.status(400).json({ message: error.message });
-    }
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });

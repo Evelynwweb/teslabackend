@@ -1,43 +1,71 @@
 const User = require('../models/User');
 const Withdrawal = require('../models/Withdrawal');
 const Transaction = require('../models/Transaction');
-const sendEmailJS = require('../utils/emailHelper');  // <--- ADD THIS
+const sendEmailJS = require('../utils/emailHelper');
+const { getGeneralSettings } = require('../utils/siteSettings');
 
 exports.confirmPassword = async (req, res) => {
   const { password } = req.body;
+  if (!password) return res.status(400).json({ message: 'Password required' });
   const user = await User.findById(req.user._id);
   const isMatch = await user.matchPassword(password);
-  if (!isMatch) return res.status(401).json({ message: 'Incorrect password' });
+  // 400, not 401: the dashboard treats 401 as "session expired" and logs out
+  if (!isMatch) return res.status(400).json({ message: 'Incorrect password' });
   res.json({ success: true });
 };
 
 exports.createWithdrawal = async (req, res) => {
   try {
-    const { amount, method, details, wcCode } = req.body;
+    const { method, details, wcCode } = req.body;
+    const amount = Number(req.body.amount);
     const user = req.user;
+    const settings = await getGeneralSettings();
 
-    if (!amount || amount < 10) {
-      return res.status(400).json({ message: 'Minimum withdrawal is $10' });
+    if (!method) {
+      return res.status(400).json({ message: 'Withdrawal method required' });
     }
-    if (user.balance < amount) {
-      return res.status(400).json({ message: 'Insufficient balance' });
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ message: 'Enter a valid amount' });
     }
+    if (amount < settings.minWithdrawal) {
+      return res.status(400).json({ message: `Minimum withdrawal is $${settings.minWithdrawal}` });
+    }
+    if (settings.maxWithdrawal && amount > settings.maxWithdrawal) {
+      return res.status(400).json({ message: `Maximum withdrawal is $${settings.maxWithdrawal}` });
+    }
+
+    const fee = +((amount * (settings.withdrawalFeePercent || 0)) / 100).toFixed(2);
+    const total = +(amount + fee).toFixed(2);
+
+    // Hold amount + fee now, atomically, so the same balance can't be
+    // withdrawn twice while a request is pending. Refunded if rejected.
+    const held = await User.findOneAndUpdate(
+      { _id: user._id, balance: { $gte: total } },
+      { $inc: { balance: -total } },
+      { returnDocument: 'after' }
+    );
+    if (!held) {
+      return res.status(400).json({ message: `Insufficient balance to cover $${amount} plus $${fee} fee` });
+    }
+
+    const transaction = await Transaction.create({
+      user: user._id,
+      amount: -total,
+      type: 'withdrawal',
+      status: 'pending',
+      description: `Withdrawal via ${method} ($${amount} + $${fee} fee)`
+    });
 
     const withdrawal = await Withdrawal.create({
       user: user._id,
       amount,
+      fee,
+      held: total,
       method,
       details: details || '',
       wcCode: wcCode || '',
-      status: 'pending'
-    });
-
-    await Transaction.create({
-      user: user._id,
-      amount: -amount,
-      type: 'withdrawal',
       status: 'pending',
-      description: `Withdrawal via ${method}`
+      transaction: transaction._id,
     });
 
     // 🔹 SEND PENDING WITHDRAWAL EMAIL

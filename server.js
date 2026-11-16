@@ -27,14 +27,6 @@ async function connectDB() {
   await connPromise;
 }
 
-// Public client config (no DB needed). The dashboard reads this to decide
-// whether signup goes through email verification first.
-app.get('/api/config', (req, res) => {
-  res.json({
-    requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === 'true',
-  });
-});
-
 // Await DB on every request (cheap once connected)
 app.use(async (req, res, next) => {
   try {
@@ -43,6 +35,42 @@ app.use(async (req, res, next) => {
   } catch (err) {
     console.error('DB connect error:', err);
     res.status(500).json({ message: 'DB connection failed' });
+  }
+});
+
+const { getGeneralSettings } = require('./utils/siteSettings');
+
+// Public client config. The dashboard reads signup, withdrawal and site
+// settings from here instead of hardcoding them.
+app.get('/api/config', async (req, res, next) => {
+  try {
+    const s = await getGeneralSettings();
+    res.json({
+      requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION === 'true',
+      siteName: s.siteName,
+      supportEmail: s.supportEmail,
+      withdrawalFeePercent: s.withdrawalFeePercent,
+      minWithdrawal: s.minWithdrawal,
+      maxWithdrawal: s.maxWithdrawal,
+      registrationEnabled: s.registrationEnabled,
+      maintenance: s.maintenance,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Maintenance mode: user-facing API answers 503; admin and cron keep working.
+app.use(async (req, res, next) => {
+  if (req.path.startsWith('/api/admin') || req.path.startsWith('/api/cron')) return next();
+  try {
+    const s = await getGeneralSettings();
+    if (s.maintenance) {
+      return res.status(503).json({ message: 'The platform is under maintenance. Please try again later.', maintenance: true });
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
 });
 

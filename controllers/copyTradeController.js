@@ -1,25 +1,30 @@
 const CopyTradeInvestment = require('../models/CopyTradeInvestment');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const { parseAmount, debitBalance } = require('../utils/balance');
+const { durationToDays } = require('../utils/duration');
 
 // POST /api/copy-trade/invest
 exports.investCopyTrade = async (req, res) => {
   try {
-    const { traderId, traderName, amount, duration, endDate } = req.body;
+    const { traderId, traderName, duration } = req.body;
+    const amount = parseAmount(req.body.amount);
     const user = req.user;
 
-    if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+    // A missing check here let a negative amount *add* money to the balance
+    if (!amount) return res.status(400).json({ message: 'Invalid amount' });
+    if (!(await debitBalance(user._id, amount))) {
+      return res.status(400).json({ message: 'Insufficient balance' });
+    }
 
-    user.balance -= amount;
-    await user.save();
-
+    const days = durationToDays(duration) || 30;
     const investment = await CopyTradeInvestment.create({
       user: user._id,
       traderId,
       traderName,
       amount,
       duration,
-      endDate: endDate || new Date(Date.now() + (duration === '14 Days' ? 14 : duration === '30 Days' ? 30 : duration === '60 Days' ? 60 : 30) * 24 * 60 * 60 * 1000)
+      endDate: new Date(Date.now() + days * 24 * 60 * 60 * 1000)
     });
 
     await Transaction.create({

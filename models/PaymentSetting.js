@@ -10,6 +10,16 @@ const paymentSettingSchema = new mongoose.Schema({
     default: {}
   },
   withdrawalFeePercent: { type: Number, default: 10, min: 0, max: 100 },
+
+  // General site settings (admin → Settings → General). Kept on this single
+  // settings document so the withdrawal fee has exactly one source.
+  siteName: { type: String, default: 'Tesla Dashboard' },
+  supportEmail: { type: String, default: '' },
+  minWithdrawal: { type: Number, default: 10, min: 0 },
+  maxWithdrawal: { type: Number, default: 10000, min: 0 },
+  maintenance: { type: Boolean, default: false },
+  registrationEnabled: { type: Boolean, default: true },
+
   
   methodDetails: {
     type: Map,

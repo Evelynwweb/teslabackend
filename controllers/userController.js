@@ -3,7 +3,8 @@ const bcrypt = require('bcryptjs');
 
 // GET /api/users/me – the signed-in user (protect already loaded it without the password)
 exports.getMe = async (req, res) => {
-  res.json(req.user);
+  // `impersonated` drives the warning banner on the user dashboard
+  res.json({ ...req.user.toObject(), impersonated: Boolean(req.impersonatedBy) });
 };
 
 // PUT /api/users/profile
@@ -41,7 +42,8 @@ exports.changePassword = async (req, res) => {
     const { current_password, password, password_confirmation } = req.body;
     const user = await User.findById(req.user._id);
     const isMatch = await user.matchPassword(current_password);
-    if (!isMatch) return res.status(401).json({ message: 'Current password incorrect' });
+    // 400, not 401: a 401 makes the dashboard log the user out
+    if (!isMatch) return res.status(400).json({ message: 'Current password incorrect' });
     if (password !== password_confirmation) return res.status(400).json({ message: 'New passwords do not match' });
     user.password = password;
     await user.save();

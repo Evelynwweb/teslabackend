@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const VerificationCode = require('../models/VerificationCode');
 const generateToken = require('../utils/generateToken');
+const { getGeneralSettings } = require('../utils/siteSettings');
 const emailjs = require('@emailjs/nodejs');
 
 const generateCode = () => Math.floor(100000 + Math.random() * 900000).toString();
@@ -50,6 +51,11 @@ router.post('/verify-code', async (req, res) => {
 
 router.post('/register', async (req, res) => {
   const { username, name, email, phone, password, country, ref_by } = req.body;
+
+  const settings = await getGeneralSettings();
+  if (!settings.registrationEnabled) {
+    return res.status(403).json({ message: 'New registrations are currently closed.' });
+  }
   
   const userExists = await User.findOne({ $or: [{ email }, { username }] });
   if (userExists) return res.status(400).json({ message: 'User already exists' });
@@ -95,9 +101,17 @@ router.post('/register', async (req, res) => {
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  const user = await User.findOne({ $or: [{ email }, { username: email }] });
+  // email and username are stored lowercase, so match case-insensitively
+  const login = String(email || '').trim().toLowerCase();
+  if (!login || !password) {
+    return res.status(400).json({ message: 'Email and password are required' });
+  }
+  const user = await User.findOne({ $or: [{ email: login }, { username: login }] });
   if (!user || !(await user.matchPassword(password))) {
     return res.status(401).json({ message: 'Invalid credentials' });
+  }
+  if (user.isActive === false) {
+    return res.status(403).json({ message: 'Your account has been suspended. Please contact support.' });
   }
   const token = generateToken(user._id);
 

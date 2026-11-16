@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
-const { protect } = require('../middleware/auth');
+const { protect, notWhileImpersonating } = require('../middleware/auth');
 const { confirmPassword, createWithdrawal } = require('../controllers/withdrawalController');
 
-router.post('/confirm-password', protect, confirmPassword);
-router.post('/', protect, createWithdrawal);
+router.post('/confirm-password', protect, notWhileImpersonating, confirmPassword);
+router.post('/', protect, notWhileImpersonating, createWithdrawal);
 
 module.exports = router;

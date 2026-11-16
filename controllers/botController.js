@@ -1,27 +1,29 @@
 const BotPurchase = require('../models/BotPurchase');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const { parseAmount, debitBalance } = require('../utils/balance');
+const { durationToDays } = require('../utils/duration');
 
 // POST /api/bots/purchase
 exports.purchaseBot = async (req, res) => {
   try {
-    const { botId, botName, amount, duration, endDate } = req.body;
+    const { botId, botName, duration } = req.body;
+    const amount = parseAmount(req.body.amount);
     const user = req.user;
 
-    if (!amount || amount <= 0) return res.status(400).json({ message: 'Invalid amount' });
-    if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+    if (!amount) return res.status(400).json({ message: 'Invalid amount' });
+    if (!(await debitBalance(user._id, amount))) {
+      return res.status(400).json({ message: 'Insufficient balance' });
+    }
 
-    // Deduct balance
-    user.balance -= amount;
-    await user.save();
-
+    const days = durationToDays(duration) || 365;
     const purchase = await BotPurchase.create({
       user: user._id,
       botId,
       botName,
       amount,
       duration,
-      endDate: endDate || new Date(Date.now() + (duration === '7 days' ? 7 : duration === '30 Days' ? 30 : 365) * 24 * 60 * 60 * 1000)
+      endDate: new Date(Date.now() + days * 24 * 60 * 60 * 1000)
     });
 
     await Transaction.create({
